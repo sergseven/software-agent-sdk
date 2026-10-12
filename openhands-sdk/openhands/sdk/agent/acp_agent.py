@@ -62,6 +62,7 @@ from acp.schema import (
     ReadTextFileResponse,
     ReleaseTerminalResponse,
     RequestPermissionResponse,
+    SessionCapabilities,
     SseMcpServer,
     TerminalOutputResponse,
     TextContentBlock,
@@ -1930,6 +1931,9 @@ class ACPAgent(AgentBase):
     # older codex/claude). Detected from the session/new (or load_session)
     # response at init and reused by runtime ``set_acp_model`` switches.
     _model_via_config_option: bool = PrivateAttr(default=False)
+    # ``agentCapabilities.sessionCapabilities`` from InitializeResponse; gates
+    # the resume/close calls around an ``ask_agent`` fork.
+    _session_capabilities: SessionCapabilities | None = PrivateAttr(default=None)
     # The model the ACP server reported as active for this session, captured
     # from ``models.currentModelId`` on the new_session / load_session
     # response.  Overridden by ``self.acp_model`` when the caller explicitly
@@ -3099,6 +3103,10 @@ class ACPAgent(AgentBase):
                 agent_version,
             )
             _log_acp_provider_version(agent_name, agent_version)
+            if init_response.agent_capabilities is not None:
+                self._session_capabilities = (
+                    init_response.agent_capabilities.session_capabilities
+                )
 
             # Translate any configured MCP servers into ACP protocol objects,
             # gating remote (http/sse) transports on what this server advertised
@@ -4368,6 +4376,14 @@ class ACPAgent(AgentBase):
                 session_id=session_id,
             )
             fork_session_id = fork_response.session_id
+            caps = self._session_capabilities
+            # claude-agent-acp >= 0.71 only writes the fork's transcript; the
+            # fork is not a live session until resumed (prompting it fails with
+            # "Session not found"). Resuming an already-live fork is a no-op.
+            if caps is not None and caps.resume is not None:
+                await conn.resume_session(
+                    cwd=self._working_dir, session_id=fork_session_id
+                )
 
             client._fork_session_id = fork_session_id
             client._fork_accumulated_text.clear()
@@ -4409,6 +4425,16 @@ class ACPAgent(AgentBase):
                 finally:
                     client._fork_session_id = None
                     client._fork_accumulated_text.clear()
+                    # The fork is single-use; release its server-side session.
+                    if caps is not None and caps.close is not None:
+                        try:
+                            await conn.close_session(session_id=fork_session_id)
+                        except Exception as e:
+                            logger.warning(
+                                "Closing ACP fork session %s failed: %s",
+                                _fingerprint_session_id(fork_session_id),
+                                e,
+                            )
 
         with client._fork_lock:
             return self._executor.run_async(_fork_and_prompt)
