@@ -392,8 +392,9 @@ def _deprecated_model_option() -> type[ACPModelOption]:
 # own ``/model`` menu offers, switched via ``set_config_option``).
 # ``opus[1m]`` is the SDK-documented version-agnostic 1M-context alias and the
 # CLI's own default (``currentValue``); ``default`` is the CLI's recommended tier
-# for the account. ``claude-opus-5`` is the explicit full model pin for users who
-# want Opus 5 rather than the provider-dependent alias. The ``/model`` menu is
+# for the account. ``opus`` / ``fable`` / ``sonnet`` / ``haiku`` track the newest
+# model of each family. claude-agent-acp 0.89 rejects full model pins such as
+# ``claude-opus-5`` (absent from its live select). The ``/model`` menu is
 # dynamic/account-dependent and the CLI validates ``set_config_option(model)``
 # against the live select — it rejects an absent id (e.g. ``sonnet`` on accounts
 # without it), so these are pre-session suggestions, not ground truth; a rejected
@@ -401,7 +402,8 @@ def _deprecated_model_option() -> type[ACPModelOption]:
 _CLAUDE_MODELS: tuple[ACPModelOption, ...] = (
     ACPModelOption(id="default", label="Default (recommended)"),
     ACPModelOption(id="opus[1m]", label="Claude Opus (1M)"),
-    ACPModelOption(id="claude-opus-5", label="Claude Opus 5"),
+    ACPModelOption(id="opus", label="Claude Opus"),
+    ACPModelOption(id="fable", label="Claude Fable"),
     ACPModelOption(id="sonnet", label="Claude Sonnet"),
     ACPModelOption(id="haiku", label="Claude Haiku"),
 )
