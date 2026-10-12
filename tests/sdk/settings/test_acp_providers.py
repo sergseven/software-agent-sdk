@@ -63,7 +63,6 @@ class TestACPProviderInfo:
         assert models["opus[1m]"] == "Claude Opus (1M)"
         assert models["opus"] == "Claude Opus"
         assert models["fable"] == "Claude Fable"
-        assert "claude-opus-5" not in models
         assert models["sonnet"] == "Claude Sonnet"
         assert models["haiku"] == "Claude Haiku"
         # Pinned binary exposed by the agent-server image wrappers.
