@@ -4940,6 +4940,86 @@ class TestACPAgentAskAgent:
         assert mock_client._fork_session_id is None
         assert mock_client._fork_accumulated_text == []
 
+    @staticmethod
+    def _run_fork(agent, conn):
+        """Run ask_agent with *conn* in place of the live connection."""
+
+        def _fake_run_async(coro_fn, **_kwargs):
+            loop = asyncio.new_event_loop()
+            try:
+                return loop.run_until_complete(coro_fn())
+            finally:
+                loop.close()
+
+        agent._executor = MagicMock(run_async=_fake_run_async)
+        agent._conn = conn
+        agent._client = _OpenHandsACPBridge()
+        agent._session_id = "main-session"
+        agent._working_dir = "/workspace"
+        return agent.ask_agent("q")
+
+    @staticmethod
+    def _recording_conn(calls: list[str]):
+        conn = MagicMock()
+
+        async def _fork(**kwargs):
+            calls.append(f"fork:{kwargs['session_id']}")
+            return MagicMock(session_id="fork-1")
+
+        async def _resume(**kwargs):
+            calls.append(f"resume:{kwargs['session_id']}")
+
+        async def _prompt(**kwargs):
+            calls.append(f"prompt:{kwargs['session_id']}")
+            return MagicMock(usage=None)
+
+        async def _close(**kwargs):
+            calls.append(f"close:{kwargs['session_id']}")
+
+        conn.fork_session = _fork
+        conn.resume_session = _resume
+        conn.prompt = _prompt
+        conn.close_session = _close
+        return conn
+
+    def test_ask_agent_resumes_fork_before_prompt_and_closes_it(self):
+        """claude-agent-acp >= 0.71 only persists a fork; it must be resumed
+        before it can be prompted (sergseven/loom-ide#2), then closed so the
+        side question does not leave a Claude Code process behind."""
+        from acp.schema import SessionCapabilities
+
+        agent = _make_agent()
+        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        calls: list[str] = []
+        self._run_fork(agent, self._recording_conn(calls))
+        assert calls == [
+            "fork:main-session",
+            "resume:fork-1",
+            "prompt:fork-1",
+            "close:fork-1",
+        ]
+
+    def test_ask_agent_skips_resume_and_close_when_not_advertised(self):
+        agent = _make_agent()
+        calls: list[str] = []
+        self._run_fork(agent, self._recording_conn(calls))
+        assert calls == ["fork:main-session", "prompt:fork-1"]
+
+    def test_ask_agent_close_failure_does_not_fail_the_answer(self):
+        from acp.schema import SessionCapabilities
+
+        agent = _make_agent()
+        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        conn = self._recording_conn([])
+
+        async def _prompt(**kwargs):
+            agent._client._fork_accumulated_text.append("answer")
+            return MagicMock(usage=None)
+
+        conn.prompt = _prompt
+        conn.close_session = AsyncMock(side_effect=ACPRequestError(-32603, "boom"))
+        assert self._run_fork(agent, conn) == "answer"
+
 
 # ---------------------------------------------------------------------------
 # Client fork text routing
