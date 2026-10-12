@@ -18,7 +18,12 @@ from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 from acp.exceptions import RequestError as ACPRequestError
-from acp.schema import NewSessionResponse, PromptResponse
+from acp.schema import (
+    NewSessionResponse,
+    PromptResponse,
+    SessionCapabilities,
+    UsageUpdate,
+)
 from pydantic import SecretStr
 
 import openhands.sdk.agent.acp_agent as acp_agent_module
@@ -4805,91 +4810,76 @@ class TestACPAgentAskAgent:
         with pytest.raises(RuntimeError, match="no session ID"):
             agent.ask_agent("What is 2+2?")
 
-    def test_ask_agent_forks_and_prompts(self):
-        """ask_agent() forks the session, prompts, and returns the response."""
-        agent = _make_agent()
-        mock_client = _OpenHandsACPBridge()
-        agent._client = mock_client
-        agent._conn = MagicMock()
-        agent._session_id = "main-session"
-        agent._working_dir = "/workspace"
+    @staticmethod
+    def _fork_conn(
+        client: _OpenHandsACPBridge,
+        calls: list[str] | None = None,
+        text: tuple[str, ...] = (),
+        usage: Any = None,
+    ):
+        """Mock connection whose fork prompt streams *text* into *client*."""
+        calls = calls if calls is not None else []
+        conn = MagicMock()
 
-        # Mock fork_session response
-        mock_fork_response = MagicMock()
-        mock_fork_response.session_id = "fork-session-123"
+        async def _fork(**kwargs):
+            calls.append(f"fork:{kwargs['session_id']}")
+            return MagicMock(session_id="fork-1")
 
-        # Mock prompt response (no usage)
-        mock_prompt_response = MagicMock()
-        mock_prompt_response.usage = None
+        async def _resume(**kwargs):
+            calls.append(f"resume:{kwargs['session_id']}")
 
-        async def _fake_prompt(*args, **kwargs):
-            # Simulate text arriving via session_update during prompt
-            mock_client._fork_accumulated_text.extend(["Hello", " world"])
-            return mock_prompt_response
+        async def _prompt(**kwargs):
+            calls.append(f"prompt:{kwargs['session_id']}")
+            client._fork_accumulated_text.extend(text)
+            return MagicMock(usage=usage)
+
+        async def _close(**kwargs):
+            calls.append(f"close:{kwargs['session_id']}")
+
+        conn.fork_session = _fork
+        conn.resume_session = _resume
+        conn.prompt = _prompt
+        conn.close_session = _close
+        return conn
+
+    @staticmethod
+    def _run_fork(agent, conn, client: _OpenHandsACPBridge):
+        """Run ask_agent with *conn* and *client* in place of the live ones."""
 
         def _fake_run_async(coro_fn, **_kwargs):
-            """Simulate the async execution synchronously."""
             loop = asyncio.new_event_loop()
             try:
-                _agent_conn(agent).fork_session = AsyncMock(
-                    return_value=mock_fork_response
-                )
-                _agent_conn(agent).prompt = _fake_prompt
                 return loop.run_until_complete(coro_fn())
             finally:
                 loop.close()
 
-        mock_executor = MagicMock()
-        mock_executor.run_async = _fake_run_async
-        agent._executor = mock_executor
+        agent._executor = MagicMock(run_async=_fake_run_async)
+        agent._conn = conn
+        agent._client = client
+        agent._session_id = "main-session"
+        agent._working_dir = "/workspace"
+        return agent.ask_agent("q")
 
-        result = agent.ask_agent("What is 2+2?")
-
-        assert result == "Hello world"
+    def test_ask_agent_forks_and_prompts(self):
+        """ask_agent() forks the session, prompts, and returns the response."""
+        client = _OpenHandsACPBridge()
+        conn = self._fork_conn(client, text=("Hello", " world"))
+        assert self._run_fork(_make_agent(), conn, client) == "Hello world"
 
     def test_ask_agent_records_token_usage(self):
         """ask_agent() records token usage from the PromptResponse."""
         agent = _make_agent()
-        mock_client = _OpenHandsACPBridge()
-        mock_client._context_window = 200000
-        agent._client = mock_client
-        agent._conn = MagicMock()
-        agent._session_id = "main-session"
-        agent._working_dir = "/workspace"
-
-        mock_fork_response = MagicMock()
-        mock_fork_response.session_id = "fork-session-456"
-
-        mock_usage = MagicMock()
-        mock_usage.input_tokens = 100
-        mock_usage.output_tokens = 50
-        mock_usage.cached_read_tokens = 10
-        mock_usage.cached_write_tokens = 5
-        mock_usage.thought_tokens = 20
-
-        mock_prompt_response = MagicMock()
-        mock_prompt_response.usage = mock_usage
-
-        async def _fake_prompt(*args, **kwargs):
-            mock_client._fork_accumulated_text.append("response")
-            return mock_prompt_response
-
-        def _fake_run_async(coro_fn, **_kwargs):
-            loop = asyncio.new_event_loop()
-            try:
-                _agent_conn(agent).fork_session = AsyncMock(
-                    return_value=mock_fork_response
-                )
-                _agent_conn(agent).prompt = _fake_prompt
-                return loop.run_until_complete(coro_fn())
-            finally:
-                loop.close()
-
-        mock_executor = MagicMock()
-        mock_executor.run_async = _fake_run_async
-        agent._executor = mock_executor
-
-        agent.ask_agent("Summarize this")
+        client = _OpenHandsACPBridge()
+        client._context_window = 200000
+        usage = MagicMock(
+            input_tokens=100,
+            output_tokens=50,
+            cached_read_tokens=10,
+            cached_write_tokens=5,
+            thought_tokens=20,
+        )
+        conn = self._fork_conn(client, text=("response",), usage=usage)
+        self._run_fork(agent, conn, client)
 
         metrics = agent.llm.metrics
         assert len(metrics.token_usages) == 1
@@ -4903,96 +4893,22 @@ class TestACPAgentAskAgent:
 
     def test_ask_agent_cleans_up_fork_state(self):
         """ask_agent() cleans up fork state even on success."""
-        agent = _make_agent()
-        mock_client = _OpenHandsACPBridge()
-        agent._client = mock_client
-        agent._conn = MagicMock()
-        agent._session_id = "main-session"
-        agent._working_dir = "/workspace"
+        client = _OpenHandsACPBridge()
+        conn = self._fork_conn(client, text=("ok",))
+        self._run_fork(_make_agent(), conn, client)
 
-        mock_fork_response = MagicMock()
-        mock_fork_response.session_id = "fork-session-789"
-
-        mock_prompt_response = MagicMock()
-        mock_prompt_response.usage = None
-
-        async def _fake_prompt(*args, **kwargs):
-            mock_client._fork_accumulated_text.append("ok")
-            return mock_prompt_response
-
-        def _fake_run_async(coro_fn, **_kwargs):
-            loop = asyncio.new_event_loop()
-            try:
-                _agent_conn(agent).fork_session = AsyncMock(
-                    return_value=mock_fork_response
-                )
-                _agent_conn(agent).prompt = _fake_prompt
-                return loop.run_until_complete(coro_fn())
-            finally:
-                loop.close()
-
-        mock_executor = MagicMock()
-        mock_executor.run_async = _fake_run_async
-        agent._executor = mock_executor
-
-        agent.ask_agent("test")
-
-        # Fork state should be cleaned up
-        assert mock_client._fork_session_id is None
-        assert mock_client._fork_accumulated_text == []
-
-    @staticmethod
-    def _run_fork(agent, conn):
-        """Run ask_agent with *conn* in place of the live connection."""
-
-        def _fake_run_async(coro_fn, **_kwargs):
-            loop = asyncio.new_event_loop()
-            try:
-                return loop.run_until_complete(coro_fn())
-            finally:
-                loop.close()
-
-        agent._executor = MagicMock(run_async=_fake_run_async)
-        agent._conn = conn
-        agent._client = _OpenHandsACPBridge()
-        agent._session_id = "main-session"
-        agent._working_dir = "/workspace"
-        return agent.ask_agent("q")
-
-    @staticmethod
-    def _recording_conn(calls: list[str]):
-        conn = MagicMock()
-
-        async def _fork(**kwargs):
-            calls.append(f"fork:{kwargs['session_id']}")
-            return MagicMock(session_id="fork-1")
-
-        async def _resume(**kwargs):
-            calls.append(f"resume:{kwargs['session_id']}")
-
-        async def _prompt(**kwargs):
-            calls.append(f"prompt:{kwargs['session_id']}")
-            return MagicMock(usage=None)
-
-        async def _close(**kwargs):
-            calls.append(f"close:{kwargs['session_id']}")
-
-        conn.fork_session = _fork
-        conn.resume_session = _resume
-        conn.prompt = _prompt
-        conn.close_session = _close
-        return conn
+        assert client._fork_session_id is None
+        assert client._fork_accumulated_text == []
 
     def test_ask_agent_resumes_fork_before_prompt_and_closes_it(self):
         """claude-agent-acp >= 0.71 only persists a fork; it must be resumed
         before it can be prompted (sergseven/loom-ide#2), then closed so the
         side question does not leave a Claude Code process behind."""
-        from acp.schema import SessionCapabilities
-
         agent = _make_agent()
         agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        client = _OpenHandsACPBridge()
         calls: list[str] = []
-        self._run_fork(agent, self._recording_conn(calls))
+        self._run_fork(agent, self._fork_conn(client, calls), client)
         assert calls == [
             "fork:main-session",
             "resume:fork-1",
@@ -5001,25 +4917,87 @@ class TestACPAgentAskAgent:
         ]
 
     def test_ask_agent_skips_resume_and_close_when_not_advertised(self):
-        agent = _make_agent()
+        client = _OpenHandsACPBridge()
         calls: list[str] = []
-        self._run_fork(agent, self._recording_conn(calls))
+        self._run_fork(_make_agent(), self._fork_conn(client, calls), client)
         assert calls == ["fork:main-session", "prompt:fork-1"]
 
     def test_ask_agent_close_failure_does_not_fail_the_answer(self):
-        from acp.schema import SessionCapabilities
-
         agent = _make_agent()
         agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
-        conn = self._recording_conn([])
+        client = _OpenHandsACPBridge()
+        conn = self._fork_conn(client, text=("answer",))
+        conn.close_session = AsyncMock(side_effect=ACPRequestError(-32603, "boom"))
+        assert self._run_fork(agent, conn, client) == "answer"
+
+    def test_ask_agent_close_timeout_does_not_block_the_answer(self):
+        agent = _make_agent()
+        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        client = _OpenHandsACPBridge()
+        conn = self._fork_conn(client, text=("answer",))
+
+        async def _hang(**_kwargs):
+            await asyncio.sleep(3600)
+
+        conn.close_session = _hang
+        with patch.object(acp_agent_module, "_FORK_CLOSE_TIMEOUT", 0.05):
+            assert self._run_fork(agent, conn, client) == "answer"
+
+    def test_ask_agent_resume_failure_still_closes_fork(self):
+        agent = _make_agent()
+        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        client = _OpenHandsACPBridge()
+        calls: list[str] = []
+        conn = self._fork_conn(client, calls)
+        conn.resume_session = AsyncMock(side_effect=ACPRequestError(-32603, "boom"))
+        with pytest.raises(ACPRequestError):
+            self._run_fork(agent, conn, client)
+        assert calls == ["fork:main-session", "close:fork-1"]
+        assert client._fork_session_id is None
+
+    def test_ask_agent_routes_updates_during_resume_to_the_fork(self):
+        """Updates the adapter sends for the fork while resuming must not
+        reach the main session's handler."""
+        agent = _make_agent()
+        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        client = _OpenHandsACPBridge()
+        conn = self._fork_conn(client)
+
+        async def _resume(**kwargs):
+            await client.session_update(
+                kwargs["session_id"],
+                UsageUpdate(sessionUpdate="usage_update", size=1000, used=1),
+            )
+
+        conn.resume_session = _resume
+        self._run_fork(agent, conn, client)
+        assert client._context_window == 0
+        assert "main-session" not in client._context_window_by_session
+
+    def test_ask_agent_records_fork_usage_update_without_touching_main_state(self):
+        """A fork UsageUpdate is recorded per session, so ask_agent neither
+        times out waiting for it nor touches the main session's state."""
+        agent = _make_agent()
+        client = _OpenHandsACPBridge()
+        client._context_window = 200000
+        client._context_window_by_session["main-session"] = 200000
+        conn = self._fork_conn(client, text=("a",))
+        inner_prompt = conn.prompt
 
         async def _prompt(**kwargs):
-            agent._client._fork_accumulated_text.append("answer")
-            return MagicMock(usage=None)
+            await client.session_update(
+                kwargs["session_id"],
+                UsageUpdate(sessionUpdate="usage_update", size=1000, used=1),
+            )
+            return await inner_prompt(**kwargs)
 
         conn.prompt = _prompt
-        conn.close_session = AsyncMock(side_effect=ACPRequestError(-32603, "boom"))
-        assert self._run_fork(agent, conn) == "answer"
+        with patch.object(ACPAgent, "_record_usage") as record:
+            self._run_fork(agent, conn, client)
+        assert record.call_args.kwargs["usage_update"].size == 1000
+        assert client._context_window == 200000
+        assert client._context_window_by_session["main-session"] == 200000
+        assert client._context_window_by_session["fork-1"] == 1000
 
 
 # ---------------------------------------------------------------------------

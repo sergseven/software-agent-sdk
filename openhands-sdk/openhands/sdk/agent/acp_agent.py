@@ -172,6 +172,10 @@ if TYPE_CHECKING:
 # completes almost immediately. This timeout is a safety net for slow
 # or remote servers.
 _USAGE_UPDATE_TIMEOUT: float = float(os.environ.get("ACP_USAGE_UPDATE_TIMEOUT", "2.0"))
+# Maximum seconds to wait for the server to close an ``ask_agent`` fork. Teardown
+# is best-effort and runs under ``_fork_lock``, so a hung close must not block
+# the computed answer or later ``ask_agent`` calls.
+_FORK_CLOSE_TIMEOUT: float = 5.0
 
 # Retry configuration for transient ACP connection errors.
 # These errors can occur when the connection drops mid-conversation but the
@@ -1453,6 +1457,14 @@ class _OpenHandsACPBridge:
                     self._fork_accumulated_text.append(
                         self._mask_value(update.content.text)
                     )
+            elif isinstance(update, UsageUpdate):
+                # Session-scoped bookkeeping only: the fork's window size must
+                # not overwrite the main session's ``_context_window``.
+                self._context_window_by_session[session_id] = update.size
+                self._turn_usage_updates[session_id] = update
+                event = self._usage_received.get(session_id)
+                if event is not None:
+                    event.set()
             return
 
         if isinstance(update, AgentMessageChunk):
@@ -3107,10 +3119,10 @@ class ACPAgent(AgentBase):
                 agent_version,
             )
             _log_acp_provider_version(agent_name, agent_version)
-            if init_response.agent_capabilities is not None:
-                self._session_capabilities = (
-                    init_response.agent_capabilities.session_capabilities
-                )
+            agent_caps = init_response.agent_capabilities
+            self._session_capabilities = (
+                agent_caps.session_capabilities if agent_caps is not None else None
+            )
 
             # Translate any configured MCP servers into ACP protocol objects,
             # gating remote (http/sse) transports on what this server advertised
@@ -3118,11 +3130,7 @@ class ACPAgent(AgentBase):
             # new_session and load_session: load_session does not persist the
             # prior MCP set server-side, so a resume must re-send it or the
             # restored session would silently lose its MCP servers.
-            mcp_caps = (
-                init_response.agent_capabilities.mcp_capabilities
-                if init_response.agent_capabilities is not None
-                else None
-            )
+            mcp_caps = agent_caps.mcp_capabilities if agent_caps is not None else None
             acp_mcp_servers = _mcp_config_to_acp_servers(self.mcp_config, mcp_caps)
             if acp_mcp_servers:
                 logger.info(
@@ -4381,17 +4389,19 @@ class ACPAgent(AgentBase):
             )
             fork_session_id = fork_response.session_id
             caps = self._session_capabilities
-            # claude-agent-acp >= 0.71 only writes the fork's transcript; the
-            # fork is not a live session until resumed (prompting it fails with
-            # "Session not found"). Resuming an already-live fork is a no-op.
-            if caps is not None and caps.resume is not None:
-                await conn.resume_session(
-                    cwd=self._working_dir, session_id=fork_session_id
-                )
 
+            # Route the fork's updates away from the main session before the
+            # first call that can emit them (resume), and so the ``finally``
+            # below always releases the fork.
             client._fork_session_id = fork_session_id
             client._fork_accumulated_text.clear()
             try:
+                # Some servers (claude-agent-acp >= 0.71) only persist the
+                # fork's transcript; it is not promptable until resumed.
+                if caps is not None and caps.resume is not None:
+                    await conn.resume_session(
+                        cwd=self._working_dir, session_id=fork_session_id
+                    )
                 fork_t0 = time.monotonic()
                 usage_sync = client.prepare_usage_sync(fork_session_id)
                 response = await conn.prompt(
@@ -4429,10 +4439,15 @@ class ACPAgent(AgentBase):
                 finally:
                     client._fork_session_id = None
                     client._fork_accumulated_text.clear()
-                    # The fork is single-use; release its server-side session.
+                    # The fork is single-use: close releases the server's live
+                    # session (and its process). Its transcript stays persisted;
+                    # we deliberately don't delete it.
                     if caps is not None and caps.close is not None:
                         try:
-                            await conn.close_session(session_id=fork_session_id)
+                            await asyncio.wait_for(
+                                conn.close_session(session_id=fork_session_id),
+                                timeout=_FORK_CLOSE_TIMEOUT,
+                            )
                         except Exception as e:
                             logger.warning(
                                 "Closing ACP fork session %s failed: %s",
