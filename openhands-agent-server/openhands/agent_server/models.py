@@ -8,7 +8,7 @@ from uuid import UUID, uuid4
 
 from pydantic import BaseModel, Field, field_validator
 
-from openhands.sdk.agent.acp_models import ACPModelInfo
+from openhands.sdk.agent.acp_models import ACPCommandInfo, ACPModelInfo
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.conversation.conversation_stats import ConversationStats
 from openhands.sdk.conversation.request import (  # re-export for backward compat
@@ -316,6 +316,16 @@ class _ConversationInfoBase(BaseModel):
             "entries are opaque aliases whose human identity lives in "
             '``description`` (e.g. claude-agent-acp\'s ``"default"`` -> '
             '``"Opus 4.7 with 1M context · ..."``).'
+        ),
+    )
+    available_commands: list[ACPCommandInfo] = Field(
+        default_factory=list,
+        description=(
+            "Slash commands the ACP server advertises for this session (its "
+            "latest ``available_commands_update``), lifted off "
+            "``ACPAgent.available_commands`` and falling back to the last "
+            "persisted list. Sending ``/<name> <args>`` as a message runs one. "
+            "Empty for native OpenHands agents and before the session starts."
         ),
     )
     supports_runtime_model_switch: bool = Field(

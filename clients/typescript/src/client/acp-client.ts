@@ -1,5 +1,5 @@
 import { HttpClient } from './http-client';
-import type { ACPModelDiscovery, ACPModelDiscoveryRequest } from '../models/acp-model-discovery';
+import type { ACPDiscovery, ACPDiscoveryRequest } from '../models/acp-discovery';
 
 export interface ACPClientOptions {
   host: string;
@@ -22,10 +22,15 @@ export class ACPClient {
     });
   }
 
-  /** Start the ACP server in a throwaway session and report its default and models. */
-  async discoverModels(request: ACPModelDiscoveryRequest): Promise<ACPModelDiscovery> {
-    const response = await this.client.post<ACPModelDiscovery>('/api/acp/models', request);
+  /** Start the ACP server in a throwaway session and report its models and slash commands. */
+  async discover(request: ACPDiscoveryRequest): Promise<ACPDiscovery> {
+    const response = await this.client.post<ACPDiscovery>('/api/acp/discover', request);
     return response.data;
+  }
+
+  /** @deprecated Use `discover`. */
+  async discoverModels(request: ACPDiscoveryRequest): Promise<ACPDiscovery> {
+    return this.discover(request);
   }
 
   close(): void {

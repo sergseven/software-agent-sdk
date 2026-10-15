@@ -327,6 +327,12 @@ def _compose_conversation_info(
         or agent_state.get("acp_available_models")
         or []
     )
+    # Same live-then-persisted chain as available_models.
+    available_commands = (
+        getattr(agent, "available_commands", None)
+        or agent_state.get("acp_available_commands")
+        or []
+    )
     # Static provider capability. Unlike the two fields above it has no
     # meaningful live-vs-persisted distinction — it's derived from the stable
     # provider identity and written once at session init — so we read the
@@ -347,6 +353,7 @@ def _compose_conversation_info(
         sub_conversation_ids=sub_conversation_ids or [],
         current_model_id=current_model_id,
         available_models=available_models,
+        available_commands=available_commands,
         supports_runtime_model_switch=supports_runtime_model_switch,
         client_tools=stored.client_tools,
         tool_module_qualnames=dict(stored.tool_module_qualnames),

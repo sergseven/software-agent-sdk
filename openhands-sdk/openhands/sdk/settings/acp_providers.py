@@ -19,7 +19,7 @@ Each record captures the static properties that are known at configuration time
                                   model switch for runtime, mid-conversation use
 - ``session_meta_key``      top-level ``_meta`` key for model selection (or ``None``)
 - ``available_models``      deprecated curated model list; ask the server with
-                            :func:`~openhands.sdk.agent.acp_model_discovery.discover_acp_models`
+                            :func:`~openhands.sdk.agent.acp_discovery.discover_acp_session`
 - ``default_model``         deprecated curated default model (or ``None``)
 - ``file_secrets``          reserved "file-content" credential secrets the
                             provider authenticates from (Codex ``auth.json``,
@@ -52,8 +52,8 @@ from openhands.sdk.utils.deprecation import warn_deprecated
 
 
 _ASK_THE_ACP_SERVER = (
-    "Ask the ACP server for its models instead: POST /api/acp/models, or "
-    "openhands.sdk.agent.acp_model_discovery.discover_acp_models()."
+    "Ask the ACP server for its models instead: POST /api/acp/discover, or "
+    "openhands.sdk.agent.acp_discovery.discover_acp_session()."
 )
 
 
@@ -256,7 +256,7 @@ class ACPProviderInfo:
     available_models: tuple[ACPModelOption, ...] = field(
         default=(), compare=False, repr=False
     )
-    """Deprecated: ask the ACP server with ``discover_acp_models`` instead.
+    """Deprecated: ask the ACP server with ``discover_acp_session`` instead.
 
     Curated list of models surfaced in this provider's ``acp_model`` picker.
 
@@ -268,7 +268,7 @@ class ACPProviderInfo:
     """
 
     default_model: str | None = field(default=None, compare=False, repr=False)
-    """Deprecated: ask the ACP server with ``discover_acp_models`` instead.
+    """Deprecated: ask the ACP server with ``discover_acp_session`` instead.
 
     Model ID preselected when no ``acp_model`` is configured, or ``None``.
 

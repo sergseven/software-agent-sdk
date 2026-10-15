@@ -572,13 +572,14 @@ describe('Auxiliary API clients', () => {
     );
   });
 
-  it('ACPClient.discoverModels posts the agent and secrets and returns the discovery', async () => {
+  it('ACPClient.discover posts the agent, secrets and working dir and returns the discovery', async () => {
     const discovery = {
       agent_name: 'pi-acp',
       agent_version: '0.0.33',
       current_model_id: 'anthropic/claude-opus-4-8',
       available_models: [{ model_id: 'anthropic/claude-opus-4-8', name: 'Opus 4.8' }],
       supports_runtime_model_switch: true,
+      available_commands: [{ name: 'compact', description: 'Compact', input_hint: '<why>' }],
       error: null,
     };
     global.fetch = vi.fn().mockResolvedValue(
@@ -595,14 +596,15 @@ describe('Auxiliary API clients', () => {
           url: '/api/settings/secrets/ANTHROPIC_API_KEY',
         },
       },
+      working_dir: '/work/repo',
     };
 
     const client = new ACPClient({ host: 'http://example.com/', apiKey: 'secret' });
-    const result = await client.discoverModels(request);
+    const result = await client.discover(request);
 
     expect(result).toEqual(discovery);
     const [url, init] = (global.fetch as Mock).mock.calls[0];
-    expect(url).toBe('http://example.com/api/acp/models');
+    expect(url).toBe('http://example.com/api/acp/discover');
     expect(init).toMatchObject({ method: 'POST' });
     expect(JSON.parse(init.body as string)).toEqual(request);
   });

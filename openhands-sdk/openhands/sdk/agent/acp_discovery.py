@@ -1,4 +1,4 @@
-"""Ask an ACP server which models it offers, without starting a conversation."""
+"""Ask an ACP server what it offers (models, slash commands) without a conversation."""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from openhands.sdk.agent.acp_agent import (
     _acp_error_detail,
     _classify_acp_init_error,
 )
-from openhands.sdk.agent.acp_models import ACPModelDiscovery, ACPModelDiscoveryError
+from openhands.sdk.agent.acp_models import ACPDiscovery, ACPDiscoveryError
 from openhands.sdk.conversation.state import ConversationState
 from openhands.sdk.credential import VersionedCredentialBinding
 from openhands.sdk.event import Event
@@ -26,17 +26,23 @@ from openhands.sdk.workspace.local import LocalWorkspace
 
 logger = get_logger(__name__)
 
-_PROBE_DIR_PREFIX = ".acp-model-discovery-"
+_PROBE_DIR_PREFIX = ".acp-discovery-"
 
 
-def discover_acp_models(
+def discover_acp_session(
     settings: ACPAgentSettings,
     *,
     secrets: Mapping[str, SecretValue] | None = None,
     credential_bindings: Mapping[str, VersionedCredentialBinding] | None = None,
     work_root: str | Path | None = None,
-) -> ACPModelDiscovery:
-    """Start the server in a throwaway session and report what it offers."""
+    working_dir: str | Path | None = None,
+) -> ACPDiscovery:
+    """Start the server in a throwaway session and report what it offers.
+
+    The session runs in ``working_dir`` when given, so project-level commands
+    (e.g. ``.claude/skills``) are listed; otherwise in an empty probe
+    directory. The session is never prompted.
+    """
     agent = ACPAgent(
         acp_command=settings.resolve_acp_command(),
         acp_server=settings.acp_server,
@@ -57,8 +63,11 @@ def discover_acp_models(
     try:
         for name, binding in (credential_bindings or {}).items():
             agent.activate_file_credential_binding(name, binding)
-        workspace = probe_dir / "workspace"
-        workspace.mkdir()
+        if working_dir is not None:
+            workspace = Path(working_dir)
+        else:
+            workspace = probe_dir / "workspace"
+            workspace.mkdir()
         state = ConversationState.create(
             id=uuid.uuid4(),
             agent=agent,
@@ -68,33 +77,32 @@ def discover_acp_models(
         state.secret_registry.update_secrets(dict(secrets or {}))
         with state:
             agent.init_state(state, on_event=on_event)
-        return ACPModelDiscovery(
+        return ACPDiscovery(
             agent_name=agent.agent_name or None,
             agent_version=agent.agent_version or None,
             current_model_id=agent.current_model_id,
             available_models=agent.available_models,
             supports_runtime_model_switch=agent.supports_runtime_model_switch,
+            available_commands=agent.available_commands,
         )
     except Exception as exc:
         if errors:
-            error = ACPModelDiscoveryError(code=errors[0].code, detail=errors[0].detail)
+            error = ACPDiscoveryError(code=errors[0].code, detail=errors[0].detail)
         else:
             registry = state.secret_registry if state is not None else None
-            error = ACPModelDiscoveryError(
+            error = ACPDiscoveryError(
                 code=_classify_acp_init_error(exc),
                 detail=_acp_error_detail(exc, registry),
             )
         logger.info(
-            "ACP model discovery failed: server=%s code=%s",
+            "ACP discovery failed: server=%s code=%s",
             settings.acp_server,
             error.code,
         )
-        return ACPModelDiscovery(error=error)
+        return ACPDiscovery(error=error)
     finally:
         try:
             agent.close()
         except Exception:
-            logger.warning(
-                "Failed to stop the ACP model-discovery server", exc_info=True
-            )
+            logger.warning("Failed to stop the ACP discovery server", exc_info=True)
         shutil.rmtree(probe_dir, ignore_errors=True)

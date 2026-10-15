@@ -1,4 +1,4 @@
-"""Tests for ``POST /api/acp/models``."""
+"""Tests for ``POST /api/acp/discover`` (and its deprecated ``/models`` alias)."""
 
 from __future__ import annotations
 
@@ -19,8 +19,8 @@ from openhands.agent_server.local_secret_resolver import local_secret_resolution
 from openhands.agent_server.persistence import get_secrets_store
 from openhands.sdk.agent.acp_file_credentials import CODEX_AUTH_SECRET_NAME
 from openhands.sdk.agent.acp_models import (
-    ACPModelDiscovery,
-    ACPModelDiscoveryError,
+    ACPDiscovery,
+    ACPDiscoveryError,
     ACPModelInfo,
 )
 
@@ -48,11 +48,11 @@ def client(config: Config) -> Iterator[TestClient]:
 
 
 class _FakeDiscovery:
-    def __init__(self, result: ACPModelDiscovery) -> None:
+    def __init__(self, result: ACPDiscovery) -> None:
         self.result = result
         self.calls: list[dict[str, Any]] = []
 
-    def __call__(self, settings, **kwargs: Any) -> ACPModelDiscovery:
+    def __call__(self, settings, **kwargs: Any) -> ACPDiscovery:
         self.calls.append({"settings": settings, **kwargs})
         return self.result
 
@@ -60,16 +60,16 @@ class _FakeDiscovery:
 @pytest.fixture
 def fake_discovery(monkeypatch: pytest.MonkeyPatch) -> _FakeDiscovery:
     fake = _FakeDiscovery(
-        ACPModelDiscovery(
+        ACPDiscovery(
             current_model_id="m1", available_models=[ACPModelInfo(model_id="m1")]
         )
     )
-    monkeypatch.setattr(acp_router_module, "discover_acp_models", fake)
+    monkeypatch.setattr(acp_router_module, "discover_acp_session", fake)
     return fake
 
 
 def _discover(client: TestClient, **body: Any):
-    return client.post("/api/acp/models", json={"agent_settings": FAKE_AGENT, **body})
+    return client.post("/api/acp/discover", json={"agent_settings": FAKE_AGENT, **body})
 
 
 def test_reports_a_live_servers_models(
@@ -139,8 +139,8 @@ def test_new_credentials_ask_the_server_again(
 def test_does_not_reuse_a_failure(
     client: TestClient, fake_discovery: _FakeDiscovery
 ) -> None:
-    fake_discovery.result = ACPModelDiscovery(
-        error=ACPModelDiscoveryError(code="ACPAuthRequired", detail="log in")
+    fake_discovery.result = ACPDiscovery(
+        error=ACPDiscoveryError(code="ACPAuthRequired", detail="log in")
     )
 
     first = _discover(client)
@@ -158,7 +158,7 @@ def test_uses_the_stored_codex_login_like_a_conversation(
     sent = {"kind": "StaticSecret", "value": "pasted"}
 
     client.post(
-        "/api/acp/models",
+        "/api/acp/discover",
         json={
             "agent_settings": {"agent_kind": "acp", "acp_server": "codex"},
             "secrets": {CODEX_AUTH_SECRET_NAME: sent},
@@ -173,7 +173,7 @@ def test_uses_the_stored_codex_login_like_a_conversation(
 
 def test_rejects_a_custom_server_without_a_command(client: TestClient) -> None:
     response = client.post(
-        "/api/acp/models",
+        "/api/acp/discover",
         json={"agent_settings": {"agent_kind": "acp", "acp_server": "custom"}},
     )
 
@@ -191,3 +191,38 @@ def test_is_unavailable_when_conversations_run_in_containers(
 
     assert response.status_code == 501
     assert fake_discovery.calls == []
+
+
+def test_lists_commands_for_the_working_dir(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("FAKE_ACP_KEY", raising=False)
+    project = tmp_path / "project"
+    (project / ".claude" / "skills" / "backlog-show").mkdir(parents=True)
+
+    in_project = _discover(client, working_dir=str(project)).json()
+    without = _discover(client).json()
+
+    assert [c["name"] for c in in_project["available_commands"]] == [
+        "compact",
+        "backlog-show",
+    ]
+    assert [c["name"] for c in without["available_commands"]] == ["compact"]
+
+
+def test_rejects_a_missing_working_dir(
+    client: TestClient, fake_discovery: _FakeDiscovery, tmp_path: Path
+) -> None:
+    response = _discover(client, working_dir=str(tmp_path / "missing"))
+
+    assert response.status_code == 422
+    assert fake_discovery.calls == []
+
+
+def test_models_alias_still_answers(
+    client: TestClient, fake_discovery: _FakeDiscovery
+) -> None:
+    response = client.post("/api/acp/models", json={"agent_settings": FAKE_AGENT})
+
+    assert response.status_code == 200
+    assert response.json()["current_model_id"] == "m1"
