@@ -22,6 +22,9 @@ from acp.schema import (
     NewSessionResponse,
     PromptResponse,
     SessionCapabilities,
+    SessionCloseCapabilities,
+    SessionForkCapabilities,
+    SessionResumeCapabilities,
     UsageUpdate,
 )
 from pydantic import SecretStr
@@ -4905,7 +4908,11 @@ class TestACPAgentAskAgent:
         before it can be prompted (sergseven/loom-ide#2), then closed so the
         side question does not leave a Claude Code process behind."""
         agent = _make_agent()
-        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        agent._session_capabilities = SessionCapabilities(
+            fork=SessionForkCapabilities(),
+            resume=SessionResumeCapabilities(),
+            close=SessionCloseCapabilities(),
+        )
         client = _OpenHandsACPBridge()
         calls: list[str] = []
         self._run_fork(agent, self._fork_conn(client, calls), client)
@@ -4924,7 +4931,11 @@ class TestACPAgentAskAgent:
 
     def test_ask_agent_close_failure_does_not_fail_the_answer(self):
         agent = _make_agent()
-        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        agent._session_capabilities = SessionCapabilities(
+            fork=SessionForkCapabilities(),
+            resume=SessionResumeCapabilities(),
+            close=SessionCloseCapabilities(),
+        )
         client = _OpenHandsACPBridge()
         conn = self._fork_conn(client, text=("answer",))
         conn.close_session = AsyncMock(side_effect=ACPRequestError(-32603, "boom"))
@@ -4932,7 +4943,11 @@ class TestACPAgentAskAgent:
 
     def test_ask_agent_close_timeout_does_not_block_the_answer(self):
         agent = _make_agent()
-        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        agent._session_capabilities = SessionCapabilities(
+            fork=SessionForkCapabilities(),
+            resume=SessionResumeCapabilities(),
+            close=SessionCloseCapabilities(),
+        )
         client = _OpenHandsACPBridge()
         conn = self._fork_conn(client, text=("answer",))
 
@@ -4945,7 +4960,11 @@ class TestACPAgentAskAgent:
 
     def test_ask_agent_resume_failure_still_closes_fork(self):
         agent = _make_agent()
-        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        agent._session_capabilities = SessionCapabilities(
+            fork=SessionForkCapabilities(),
+            resume=SessionResumeCapabilities(),
+            close=SessionCloseCapabilities(),
+        )
         client = _OpenHandsACPBridge()
         calls: list[str] = []
         conn = self._fork_conn(client, calls)
@@ -4959,14 +4978,18 @@ class TestACPAgentAskAgent:
         """Updates the adapter sends for the fork while resuming must not
         reach the main session's handler."""
         agent = _make_agent()
-        agent._session_capabilities = SessionCapabilities(fork={}, resume={}, close={})
+        agent._session_capabilities = SessionCapabilities(
+            fork=SessionForkCapabilities(),
+            resume=SessionResumeCapabilities(),
+            close=SessionCloseCapabilities(),
+        )
         client = _OpenHandsACPBridge()
         conn = self._fork_conn(client)
 
         async def _resume(**kwargs):
             await client.session_update(
                 kwargs["session_id"],
-                UsageUpdate(sessionUpdate="usage_update", size=1000, used=1),
+                UsageUpdate(session_update="usage_update", size=1000, used=1),
             )
 
         conn.resume_session = _resume
@@ -4987,7 +5010,7 @@ class TestACPAgentAskAgent:
         async def _prompt(**kwargs):
             await client.session_update(
                 kwargs["session_id"],
-                UsageUpdate(sessionUpdate="usage_update", size=1000, used=1),
+                UsageUpdate(session_update="usage_update", size=1000, used=1),
             )
             return await inner_prompt(**kwargs)
 
