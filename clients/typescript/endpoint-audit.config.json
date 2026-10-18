@@ -31,7 +31,7 @@
       "tracking": "https://github.com/OpenHands/software-agent-sdk/pull/3744"
     },
     {
-      "endpoints": ["POST /api/acp/models"],
+      "endpoints": ["POST /api/acp/discover", "POST /api/acp/models"],
       "reason": "Client-ahead API stacked on the pending Agent Server ACP model discovery endpoint.",
       "owner": "OpenHands SDK maintainers",
       "tracking": "https://github.com/OpenHands/software-agent-sdk/pull/5579"

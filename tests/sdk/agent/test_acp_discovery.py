@@ -1,4 +1,4 @@
-"""Model discovery and legacy model selection against a real stdio ACP server."""
+"""Discovery, commands and legacy model selection against a real stdio ACP server."""
 
 from __future__ import annotations
 
@@ -9,8 +9,13 @@ from pathlib import Path
 import pytest
 
 from openhands.sdk.agent.acp_agent import ACPAgent
-from openhands.sdk.agent.acp_model_discovery import discover_acp_models
-from openhands.sdk.agent.acp_models import ACPModelDiscoveryError, ACPModelInfo
+from openhands.sdk.agent.acp_discovery import discover_acp_session
+from openhands.sdk.agent.acp_models import (
+    ACPCommandInfo,
+    ACPDiscoveryError,
+    ACPModelInfo,
+)
+from openhands.sdk.conversation.impl.local_conversation import LocalConversation
 from openhands.sdk.conversation.state import ConversationState
 from openhands.sdk.settings.model import ACPAgentSettings
 from openhands.sdk.workspace.local import LocalWorkspace
@@ -38,7 +43,7 @@ def _settings(**overrides) -> ACPAgentSettings:
 
 
 def test_reports_default_and_models_from_config_options(work_root: Path) -> None:
-    result = discover_acp_models(_settings(), work_root=work_root)
+    result = discover_acp_session(_settings(), work_root=work_root)
 
     assert result.error is None
     assert (result.agent_name, result.agent_version) == ("fake-acp", "1.2.3")
@@ -52,7 +57,7 @@ def test_reports_models_from_the_legacy_models_block(
 ) -> None:
     monkeypatch.setenv("FAKE_ACP_MODELS", "legacy")
 
-    result = discover_acp_models(_settings(), work_root=work_root)
+    result = discover_acp_session(_settings(), work_root=work_root)
 
     assert result.error is None
     assert result.current_model_id == "m1"
@@ -63,7 +68,7 @@ def test_reports_models_from_the_legacy_models_block(
 
 
 def test_secrets_reach_the_server(work_root: Path) -> None:
-    result = discover_acp_models(
+    result = discover_acp_session(
         _settings(), secrets={"FAKE_ACP_KEY": "key"}, work_root=work_root
     )
 
@@ -71,7 +76,7 @@ def test_secrets_reach_the_server(work_root: Path) -> None:
 
 
 def test_reports_the_server_default_not_the_requested_model(work_root: Path) -> None:
-    result = discover_acp_models(_settings(acp_model="m2"), work_root=work_root)
+    result = discover_acp_session(_settings(acp_model="m2"), work_root=work_root)
 
     assert result.current_model_id == "m1"
 
@@ -81,9 +86,9 @@ def test_reports_an_auth_failure(
 ) -> None:
     monkeypatch.setenv("FAKE_ACP_REQUIRE_KEY", "1")
 
-    result = discover_acp_models(_settings(), work_root=work_root)
+    result = discover_acp_session(_settings(), work_root=work_root)
 
-    assert result.error == ACPModelDiscoveryError(
+    assert result.error == ACPDiscoveryError(
         code="ACPAuthRequired", detail="[-32000] Authentication required"
     )
     assert result.available_models == []
@@ -95,7 +100,7 @@ def test_reports_a_spawn_failure(work_root: Path, tmp_path: Path) -> None:
         acp_server="custom", acp_command=[str(tmp_path / "no-such-acp-server")]
     )
 
-    result = discover_acp_models(settings, work_root=work_root)
+    result = discover_acp_session(settings, work_root=work_root)
 
     assert result.error is not None
     assert result.error.code == "ACPSpawnError"
@@ -142,3 +147,55 @@ def test_legacy_server_switches_models_at_runtime(
         assert agent.current_model_id == "m2"
     finally:
         agent.close()
+
+
+def test_reports_commands_for_the_working_dir(work_root: Path, tmp_path: Path) -> None:
+    project = tmp_path / "project"
+    (project / ".claude" / "skills" / "backlog-show").mkdir(parents=True)
+
+    in_project = discover_acp_session(
+        _settings(), work_root=work_root, working_dir=project
+    )
+    without = discover_acp_session(_settings(), work_root=work_root)
+
+    assert in_project.available_commands == [
+        ACPCommandInfo(name="compact", description="Compact", input_hint="<why>"),
+        ACPCommandInfo(name="backlog-show", description="backlog-show skill"),
+    ]
+    assert [c.name for c in without.available_commands] == ["compact"]
+    assert sorted(p.name for p in project.rglob("*")) == [
+        ".claude",
+        "backlog-show",
+        "skills",
+    ]
+    assert list(work_root.iterdir()) == []
+
+
+def test_session_start_persists_the_advertised_commands(tmp_path: Path) -> None:
+    agent = ACPAgent(acp_command=FAKE_COMMAND)
+    state = ConversationState.create(
+        id=uuid.uuid4(),
+        agent=agent,
+        workspace=LocalWorkspace(working_dir=str(tmp_path)),
+    )
+    try:
+        with state:
+            agent.init_state(state, on_event=lambda _: None)
+        assert [c.name for c in agent.available_commands] == ["compact"]
+        assert [c["name"] for c in state.agent_state["acp_available_commands"]] == [
+            "compact"
+        ]
+    finally:
+        agent.close()
+
+
+def test_a_turn_persists_commands_the_server_changed(tmp_path: Path) -> None:
+    agent = ACPAgent(acp_command=FAKE_COMMAND)
+    conversation = LocalConversation(agent, workspace=str(tmp_path))
+    try:
+        conversation.send_message("hi")
+        conversation.run()
+        persisted = conversation.state.agent_state["acp_available_commands"]
+        assert [c["name"] for c in persisted] == ["compact", "after-prompt"]
+    finally:
+        conversation.close()

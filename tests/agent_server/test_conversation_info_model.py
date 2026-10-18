@@ -28,7 +28,7 @@ from openhands.agent_server.models import ConversationInfo, StoredConversation
 from openhands.agent_server.utils import utc_now
 from openhands.sdk import LLM, Agent, Tool
 from openhands.sdk.agent.acp_agent import ACPAgent
-from openhands.sdk.agent.acp_models import ACPModelInfo
+from openhands.sdk.agent.acp_models import ACPCommandInfo, ACPModelInfo
 from openhands.sdk.conversation.state import (
     ConversationExecutionStatus,
     ConversationState,
@@ -353,3 +353,19 @@ def test_supports_runtime_model_switch_defaults_false():
     info = _compose_conversation_info(stored, state)
 
     assert info.supports_runtime_model_switch is False
+
+
+def test_available_commands_read_from_persisted_agent_state():
+    agent = ACPAgent(acp_command=["echo", "test"])
+    state = _make_state(agent)
+    state.agent_state = {
+        "acp_available_commands": [
+            {"name": "compact", "description": "Compact", "input_hint": "<why>"}
+        ],
+    }
+
+    info = _compose_conversation_info(_make_stored(state), state)
+
+    assert info.available_commands == [
+        ACPCommandInfo(name="compact", description="Compact", input_hint="<why>")
+    ]

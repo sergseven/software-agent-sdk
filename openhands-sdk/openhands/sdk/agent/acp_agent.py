@@ -47,6 +47,7 @@ from acp.schema import (
     AgentMessageChunk,
     AgentThoughtChunk,
     AllowedOutcome,
+    AvailableCommandsUpdate,
     CreateElicitationResponse,
     CreateTerminalResponse,
     DeclineElicitationResponse,
@@ -106,7 +107,7 @@ from openhands.sdk.agent.acp_file_credentials import (
     file_credential_looks_usable,
     write_secret_file,
 )
-from openhands.sdk.agent.acp_models import ACPModelInfo
+from openhands.sdk.agent.acp_models import ACPCommandInfo, ACPModelInfo
 from openhands.sdk.agent.acp_tracing import ACPTurnTrace
 from openhands.sdk.agent.base import AgentBase
 from openhands.sdk.agent.stream_context import StreamContext
@@ -273,6 +274,11 @@ _STREAM_READER_LIMIT: int = 100 * 1024 * 1024  # 100 MiB
 # well below the ~20 min runtime-api kill threshold.  Shared with the
 # agent-server's streaming-delta heartbeat so both paths keep the same pace.
 ACTIVITY_SIGNAL_INTERVAL: Final[float] = 30.0
+
+# How long session setup waits for the server's first available_commands_update.
+# Servers that send one do so right after the setup response; servers that never
+# do pay this once per launch.
+_AVAILABLE_COMMANDS_WAIT_SECONDS: Final[float] = 1.0
 
 # ACP tool-call statuses that represent a terminal outcome.  Non-terminal
 # statuses (``pending``, ``in_progress``) mean the call is still in flight
@@ -1334,6 +1340,10 @@ class _OpenHandsACPBridge:
         # Per-turn synchronization for UsageUpdate notifications.
         self._turn_usage_updates: dict[str, Any] = {}
         self._usage_received: dict[str, asyncio.Event] = {}
+        # Latest ``available_commands_update`` per session (persists across
+        # turns; servers send it after session setup and when commands change).
+        self.available_commands: dict[str, list[ACPCommandInfo]] = {}
+        self._commands_received: dict[str, asyncio.Event] = {}
         # Fork session state for ask_agent() — guarded by _fork_lock to
         # prevent concurrent ask_agent() calls from colliding.
         self._fork_lock = threading.Lock()
@@ -1388,6 +1398,20 @@ class _OpenHandsACPBridge:
         """Consume per-turn UsageUpdate synchronization state for a session."""
         self._usage_received.pop(session_id, None)
         return self._turn_usage_updates.pop(session_id, None)
+
+    async def wait_for_available_commands(
+        self, session_id: str, timeout: float
+    ) -> None:
+        """Wait up to ``timeout`` for the session's first command list.
+
+        Servers send ``available_commands_update`` right *after* answering
+        session setup, so it has usually not arrived when setup returns.
+        """
+        if session_id in self.available_commands:
+            return
+        event = self._commands_received.setdefault(session_id, asyncio.Event())
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(event.wait(), timeout)
 
     def _mask_value(self, value: Any) -> Any:
         """Mask injected secrets in *value* (string or JSON-like), no-op if unset.
@@ -1493,6 +1517,11 @@ class _OpenHandsACPBridge:
             event = self._usage_received.get(session_id)
             if event is not None:
                 event.set()
+        elif isinstance(update, AvailableCommandsUpdate):
+            self.available_commands[session_id] = [
+                ACPCommandInfo.from_protocol(c) for c in update.available_commands
+            ]
+            self._commands_received.setdefault(session_id, asyncio.Event()).set()
         elif isinstance(update, ToolCallStart):
             entry = {
                 "tool_call_id": update.tool_call_id,
@@ -2222,6 +2251,18 @@ class ACPAgent(AgentBase):
         return list(self._available_models or [])
 
     @property
+    def available_commands(self) -> list[ACPCommandInfo]:
+        """Slash commands the ACP server advertises for this session.
+
+        The latest ``available_commands_update``; empty until one arrives.
+        In-process runtime state like ``available_models``: the agent-server
+        lifts it onto ``ConversationInfo.available_commands``.
+        """
+        if self._client is None or self._session_id is None:
+            return []
+        return list(self._client.available_commands.get(self._session_id, []))
+
+    @property
     def supports_runtime_model_switch(self) -> bool:
         """Whether a live, mid-conversation model switch will be attempted.
 
@@ -2433,6 +2474,12 @@ class ACPAgent(AgentBase):
             ]
         elif not truly_resumed:
             new_agent_state.pop("acp_available_models", None)
+        if self.available_commands:
+            new_agent_state["acp_available_commands"] = [
+                c.model_dump() for c in self.available_commands
+            ]
+        elif not truly_resumed:
+            new_agent_state.pop("acp_available_commands", None)
         state.agent_state = new_agent_state
 
         if self._installed_suffix:
@@ -3335,6 +3382,10 @@ class ACPAgent(AgentBase):
                 logger.info("Setting ACP session mode: %s", mode_id)
                 await conn.set_session_mode(mode_id=mode_id, session_id=session_id)
 
+            await client.wait_for_available_commands(
+                session_id, _AVAILABLE_COMMANDS_WAIT_SECONDS
+            )
+
             return (
                 session_id,
                 agent_name,
@@ -3643,6 +3694,15 @@ class ACPAgent(AgentBase):
                 "acp_suffix_installed": True,
             }
 
+    def _commit_available_commands(self, state: ConversationState) -> None:
+        """Persist a command list the server changed during the turn."""
+        commands = [c.model_dump() for c in self.available_commands]
+        if commands and state.agent_state.get("acp_available_commands") != commands:
+            state.agent_state = {
+                **state.agent_state,
+                "acp_available_commands": commands,
+            }
+
     async def _do_acp_prompt(self, prompt_blocks: list[Any]) -> PromptResponse | None:
         """One ACP ``conn.prompt`` round-trip + UsageUpdate sync.
 
@@ -3756,6 +3816,7 @@ class ACPAgent(AgentBase):
         # first-turn suffix install so a subsequent turn doesn't try to
         # re-send it (and so a future cancellation can't unmark it).
         self._commit_suffix_installation(state)
+        self._commit_available_commands(state)
 
         session_id = self._session_id or ""
         usage_update = self._client.pop_turn_usage_update(session_id)

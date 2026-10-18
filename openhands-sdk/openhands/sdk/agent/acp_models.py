@@ -1,4 +1,4 @@
-"""Stable DTOs for ACP session model metadata.
+"""Stable DTOs for ACP session metadata (models, slash commands).
 
 These live in a standalone module — *not* ``acp_agent`` — so the agent-server
 can import them for its public ``ConversationInfo`` schema without importing
@@ -11,6 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any, Protocol, runtime_checkable
 
+from acp.schema import AvailableCommand
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -121,8 +122,37 @@ class ACPModelInfo(BaseModel):
         )
 
 
-class ACPModelDiscoveryError(BaseModel):
-    """Why an ACP server could not report its models."""
+class ACPCommandInfo(BaseModel):
+    """One slash command an ACP server advertises for a session.
+
+    A stable mirror of the ACP protocol's ``AvailableCommand``, taken from the
+    server's ``available_commands_update`` notification.
+    """
+
+    name: str = Field(
+        description='Command name without the leading slash, e.g. ``"compact"``.'
+    )
+    description: str = Field(default="", description="What the command does.")
+    input_hint: str | None = Field(
+        default=None,
+        description=(
+            'Placeholder for the free-text argument, e.g. ``"<instructions>"``. '
+            "``None`` when the command takes no argument hint."
+        ),
+    )
+
+    @classmethod
+    def from_protocol(cls, raw: AvailableCommand) -> ACPCommandInfo:
+        unstructured = raw.input.root if raw.input is not None else None
+        return cls(
+            name=raw.name,
+            description=raw.description,
+            input_hint=unstructured.hint if unstructured is not None else None,
+        )
+
+
+class ACPDiscoveryError(BaseModel):
+    """Why an ACP server could not start a discovery session."""
 
     code: str = Field(
         description=(
@@ -134,7 +164,7 @@ class ACPModelDiscoveryError(BaseModel):
     detail: str = Field(description="Human-readable, secret-free cause.")
 
 
-class ACPModelDiscovery(BaseModel):
+class ACPDiscovery(BaseModel):
     """What an ACP server reports for a fresh session, before any conversation."""
 
     model_config = ConfigDict(protected_namespaces=())
@@ -164,7 +194,14 @@ class ACPModelDiscovery(BaseModel):
         default=False,
         description="Whether a conversation can switch among these models live.",
     )
-    error: ACPModelDiscoveryError | None = Field(
+    available_commands: list[ACPCommandInfo] = Field(
+        default_factory=list,
+        description=(
+            "Slash commands the server advertises for a session in the requested "
+            "working directory. Empty when the server does not advertise any."
+        ),
+    )
+    error: ACPDiscoveryError | None = Field(
         default=None,
         description="Set when the server could not start a session.",
     )
